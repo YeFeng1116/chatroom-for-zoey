@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Zoey's Tree Hole</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; max-width: 500px; margin: 40px auto; padding: 0 20px; background: #f0f2f5; }
+  h2 { text-align: center; color: #333; }
+  #login, #chat { display: none; background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+  #messages { border: 1px solid #ddd; border-radius: 10px; padding: 10px; height: 350px; overflow-y: auto; background: #fafafa; margin-bottom: 10px; }
+  .msg { margin: 6px 0; padding: 8px 12px; border-radius: 12px; max-width: 80%; word-wrap: break-word; }
+  .msg.self { background-color: #4a90e2; color: #fff; margin-left: auto; text-align: right; }
+  .msg.other { background-color: #e2e2e2; color: #333; margin-right: auto; }
+  input, textarea { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; box-sizing: border-box; margin-top: 10px; font-size: 14px; }
+  button { width: 100%; padding: 10px; border-radius: 8px; border: none; font-size: 16px; margin-top: 10px; cursor: pointer; transition: background 0.3s; }
+  button:hover { opacity: 0.9; }
+  .chat-img { max-width: 100%; border-radius: 10px; margin-top: 5px; }
+  .time { font-size: 10px; color: #999; margin-top: 2px; }
+  .recording { background-color: red; }
+  #sendBtn,#sendImgBtn,#recordBtn{background:#4a90e2;color:#fff;}
+  #clearBtn{background:red;color:#fff;}
+  #scrollBtn,#newMsgBtn{background:#4CAF50;color:#fff;}
+</style>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+</head>
+<body>
+
+<h2>Zoey's Tree Hole</h2>
+
+<div id="login">
+  <input id="pwd" type="password" placeholder="输入密码...">
+  <button id="enterBtn">进入聊天室</button>
+</div>
+
+<div id="chat">
+  <div id="messages"></div>
+  <input id="name" placeholder="你的昵称">
+  <textarea id="text" placeholder="输入消息..."></textarea>
+  <input type="file" id="imgFile" accept="image/*">
+  <button id="sendBtn">发送文字</button>
+  <button id="sendImgBtn">发送图片</button>
+  <button id="recordBtn">🎤 开始录音</button>
+  <button id="clearBtn">清空聊天记录</button>
+  <button id="scrollBtn">滚动到最新消息</button>
+  <button id="newMsgBtn" style="display:none;">有新消息，点击滚到底部</button>
+</div>
+
+<script>
+// ===== 登录 =====
+const correctPwd = "1116";
+const loginDiv = document.getElementById('login');
+const chatDiv = document.getElementById('chat');
+loginDiv.style.display = 'block';
+document.getElementById('enterBtn').onclick = ()=>{
+  if(document.getElementById('pwd').value===correctPwd){
+    loginDiv.style.display='none';
+    chatDiv.style.display='block';
+    initChat();
+  } else alert('密码错误！');
+};
+
+// ===== Firebase 初始化 =====
+const firebaseConfig = {
+  apiKey: "AIzaSyDRRfTxolkcKcbMAmACt6IWkgkQggDoR_k",
+  authDomain: "zoey-58d4f.firebaseapp.com",
+  databaseURL: "https://zoey-58d4f-default-rtdb.firebaseio.com",
+  projectId: "zoey-58d4f",
+  storageBucket: "zoey-58d4f.appspot.com",
+  messagingSenderId: "127750946450",
+  appId: "1:127750946450:web:30067ce25445c13bc4b04b",
+  measurementId: "G-CVRRFN38ZM"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+const roomRef = db.ref('zoey-tree-hole');
+const messagesDiv = document.getElementById('messages');
+let currentUser = "";
+let pageSize = 20;
+let firstMessageKey = null;
+let loadingHistory = false;
+
+// ===== 工具函数 =====
+function formatTimeSafe(ts){ try{return new Date(ts).toLocaleString();}catch(e){return "时间未知";} }
+function addMessageSafe(msg, prepend=false){
+  if(!msg) return;
+  const div = document.createElement('div');
+  div.className = 'msg '+(msg.name===currentUser?'self':'other');
+  const name = msg.name||"匿名";
+  const text = msg.text||"";
+  const imageUrl = msg.imageUrl||"";
+  const audioUrl = msg.audioUrl||"";
+  let timestamp = msg.timestamp; if(!timestamp||typeof timestamp!=='number') timestamp=Date.now();
+  let html=`<strong>${name}</strong><br>`;
+  if(text) html+=text+'<br>';
+  if(imageUrl) html+=`<img src="${imageUrl}" class="chat-img"><br>`;
+  if(audioUrl) html+=`<audio controls src="data:audio/webm;base64,${audioUrl}"></audio><br>`;
+  html+=`<div class="time">${formatTimeSafe(timestamp)}</div>`;
+  div.innerHTML=html;
+  if(prepend) messagesDiv.insertBefore(div, messagesDiv.firstChild);
+  else messagesDiv.appendChild(div);
+}
+
+// ===== 滚动处理 =====
+const scrollBtn = document.getElementById('scrollBtn');
+const newMsgBtn = document.getElementById('newMsgBtn');
+function scrollToBottom(){ messagesDiv.scrollTop = messagesDiv.scrollHeight; }
+scrollBtn.onclick = scrollToBottom;
+
+let isAtBottom = true;
+messagesDiv.addEventListener('scroll', ()=>{
+  const threshold = 20;
+  isAtBottom = messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight <= threshold;
+  if(isAtBottom) newMsgBtn.style.display = 'none';
+});
+
+// ===== 分页加载历史 =====
+function loadLatestMessages(){
+  roomRef.orderByChild('timestamp').limitToLast(pageSize).once('value', snapshot=>{
+    const msgs = [];
+    snapshot.forEach(snap=>{ msgs.push({...snap.val(), key:snap.key}); });
+    msgs.sort((a,b)=>a.timestamp-b.timestamp);
+    if(msgs.length>0) firstMessageKey = msgs[0].key;
+    msgs.forEach(msg => addMessageSafe(msg));
+    scrollToBottom();
+  });
+}
+
+messagesDiv.addEventListener('scroll', ()=>{
+  if(messagesDiv.scrollTop === 0 && !loadingHistory && firstMessageKey){
+    loadingHistory = true;
+    roomRef.orderByKey().endBefore(firstMessageKey).limitToLast(pageSize).once('value', snapshot=>{
+      const msgs = [];
+      snapshot.forEach(snap=>msgs.push({...snap.val(), key:snap.key}));
+      if(msgs.length>0){
+        firstMessageKey = msgs[0].key;
+        msgs.sort((a,b)=>a.timestamp-b.timestamp);
+        const scrollHeightBefore = messagesDiv.scrollHeight;
+        msgs.forEach(msg => addMessageSafe(msg, true));
+        messagesDiv.scrollTop = messagesDiv.scrollHeight - scrollHeightBefore;
+      }
+      loadingHistory = false;
+    });
+  }
+});
+
+// ===== 新消息处理 =====
+function handleNewMessage(msg){
+  addMessageSafe(msg);
+  if(isAtBottom) scrollToBottom();
+  else newMsgBtn.style.display='block';
+}
+newMsgBtn.onclick = ()=>{
+  scrollToBottom();
+  newMsgBtn.style.display='none';
+};
+
+// ===== 初始化聊天 =====
+function initChat(){
+  loadLatestMessages();
+  // 实时监听新消息
+  roomRef.on('child_added', snap=>{
+    handleNewMessage(snap.val());
+  });
+}
+
+// ===== 发送文字 =====
+document.getElementById('sendBtn').onclick=()=>{
+  const name=document.getElementById('name').value.trim();
+  const text=document.getElementById('text').value.trim();
+  if(!name||!text) return;
+  currentUser=name;
+  roomRef.push({name,name,text:text||null,imageUrl:null,audioUrl:null,timestamp:Date.now()});
+  document.getElementById('text').value='';
+};
+
+// ===== 发送图片 =====
+document.getElementById('sendImgBtn').onclick=async ()=>{
+  const file=document.getElementById('imgFile').files[0];
+  const name=document.getElementById('name').value.trim();
+  if(!file||!name) return alert("请选择图片并输入昵称");
+  currentUser=name;
+  const formData=new FormData();
+  formData.append("file",file);
+  formData.append("upload_preset","zoey111");
+  const btn=document.getElementById('sendImgBtn'); btn.disabled=true;
+  try{
+    const xhr=new XMLHttpRequest();
+    xhr.open("POST","https://api.cloudinary.com/v1_1/dumxyqnin/image/upload");
+    xhr.upload.onprogress=e=>{
+      if(e.lengthComputable){ btn.textContent=`上传中...(${Math.round(e.loaded/e.total*100)}%)`; }
+    };
+    xhr.onload=()=>{
+      const data=JSON.parse(xhr.responseText);
+      roomRef.push({name,name,text:null,imageUrl:data.secure_url||null,audioUrl:null,timestamp:Date.now()});
+      document.getElementById('imgFile').value=''; btn.textContent="发送图片"; btn.disabled=false;
+    };
+    xhr.onerror=()=>{ alert("图片上传失败"); btn.textContent="发送图片"; btn.disabled=false; };
+    xhr.send(formData);
+  }catch(e){ console.warn("图片上传异常",e); btn.textContent="发送图片"; btn.disabled=false; }
+};
+
+// ===== 录音 =====
+let recorder,audioChunks=[],isRecording=false,recordInterval;
+document.getElementById('recordBtn').onclick=async ()=>{
+  const btn=document.getElementById('recordBtn');
+  const name=document.getElementById('name').value.trim();
+  if(!name) return alert("请输入昵称");
+  currentUser=name;
+  if(!isRecording){
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      recorder=new MediaRecorder(stream); audioChunks=[];
+      recorder.ondataavailable=e=>audioChunks.push(e.data);
+      let seconds=0; recordInterval=setInterval(()=>{seconds++; btn.textContent=`录音中 ${seconds}s ⏹`;},1000);
+      recorder.onstop=()=>{
+        clearInterval(recordInterval);
+        const blob=new Blob(audioChunks,{type:'audio/webm'}); audioChunks=[];
+        const reader=new FileReader();
+        reader.onloadend=()=>{ roomRef.push({name,name,text:null,imageUrl:null,audioUrl:reader.result.split(',')[1],timestamp:Date.now()}); };
+        reader.readAsDataURL(blob);
+        btn.textContent="🎤 开始录音"; btn.classList.remove("recording"); isRecording=false;
+      };
+      recorder.start(); btn.classList.add("recording"); isRecording=true;
+    }catch(err){ alert("无法获取麦克风权限："+err); }
+  }else{ recorder.stop(); }
+};
+
+// ===== 清空 =====
+document.getElementById('clearBtn').onclick=()=>{
+  if(confirm("确定要清空聊天记录吗？")){
+    roomRef.remove(); messagesDiv.innerHTML='';
+  }
+};
+</script>
+</body>
+</html>
